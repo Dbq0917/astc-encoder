@@ -199,6 +199,11 @@ components you can specify a custom swizzle after setting the `-normal`
 parameter. For example, to match BC5n component ordering use
 `-normal -esw gggr` for compression and `-normal -dsw arz1` for decompression.
 
+Candidate encodings in normal map mode are selected using angular error rather
+than independent X and Y error. This preserves the decoded normal direction at
+grazing angles, where a small X/Y error can produce a large direction change,
+without changing the compressed block size.
+
 ## Encoding sRGB data
 
 The ASTC LDR profile can compress sRGB encoded color, which is a more

@@ -510,6 +510,8 @@ static float compress_symbolic_block_for_partition_1plane(
 	unsigned int partition_count,
 	unsigned int partition_index,
 	symbolic_compressed_block& scb,
+	symbolic_compressed_block* normal_scb,
+	float* normal_error,
 	compression_working_buffers& tmpbuf,
 	int quant_limit
 ) {
@@ -765,11 +767,20 @@ static float compress_symbolic_block_for_partition_1plane(
 			// Pre-realign test
 			if (l == 0)
 			{
-				float errorval = compute_difference(config, bsd, workscb, blk);
+				float candidate_normal_error = ERROR_CALC_DEFAULT;
+				float errorval = compute_difference(
+				    config, bsd, workscb, blk,
+				    normal_scb ? &candidate_normal_error : nullptr);
 				if (errorval == -ERROR_CALC_DEFAULT)
 				{
 					errorval = -errorval;
 					workscb.block_type = SYM_BTYPE_ERROR;
+				}
+				else if (normal_scb && (candidate_normal_error < *normal_error))
+				{
+					*normal_error = candidate_normal_error;
+					*normal_scb = workscb;
+					normal_scb->errorval = errorval;
 				}
 
 				trace_add_data("error_prerealign", errorval);
@@ -826,11 +837,20 @@ static float compress_symbolic_block_for_partition_1plane(
 			}
 
 			// Post-realign test
-			float errorval = compute_difference(config, bsd, workscb, blk);
+			float candidate_normal_error = ERROR_CALC_DEFAULT;
+			float errorval = compute_difference(
+			    config, bsd, workscb, blk,
+			    normal_scb ? &candidate_normal_error : nullptr);
 			if (errorval == -ERROR_CALC_DEFAULT)
 			{
 				errorval = -errorval;
 				workscb.block_type = SYM_BTYPE_ERROR;
+			}
+			else if (normal_scb && (candidate_normal_error < *normal_error))
+			{
+				*normal_error = candidate_normal_error;
+				*normal_scb = workscb;
+				normal_scb->errorval = errorval;
 			}
 
 			trace_add_data("error_postrealign", errorval);
@@ -888,6 +908,8 @@ static float compress_symbolic_block_for_partition_2planes(
 	float tune_errorval_threshold,
 	unsigned int plane2_component,
 	symbolic_compressed_block& scb,
+	symbolic_compressed_block* normal_scb,
+	float* normal_error,
 	compression_working_buffers& tmpbuf,
 	int quant_limit
 ) {
@@ -1113,11 +1135,20 @@ static float compress_symbolic_block_for_partition_2planes(
 			// Pre-realign test
 			if (l == 0)
 			{
-				float errorval = compute_symbolic_block_difference_2plane(config, bsd, workscb, blk);
+				float candidate_normal_error = ERROR_CALC_DEFAULT;
+				float errorval = compute_symbolic_block_difference_2plane(
+				    config, bsd, workscb, blk,
+				    normal_scb ? &candidate_normal_error : nullptr);
 				if (errorval == -ERROR_CALC_DEFAULT)
 				{
 					errorval = -errorval;
 					workscb.block_type = SYM_BTYPE_ERROR;
+				}
+				else if (normal_scb && (candidate_normal_error < *normal_error))
+				{
+					*normal_error = candidate_normal_error;
+					*normal_scb = workscb;
+					normal_scb->errorval = errorval;
 				}
 
 				trace_add_data("error_prerealign", errorval);
@@ -1167,11 +1198,20 @@ static float compress_symbolic_block_for_partition_2planes(
 			}
 
 			// Post-realign test
-			float errorval = compute_symbolic_block_difference_2plane(config, bsd, workscb, blk);
+			float candidate_normal_error = ERROR_CALC_DEFAULT;
+			float errorval = compute_symbolic_block_difference_2plane(
+			    config, bsd, workscb, blk,
+			    normal_scb ? &candidate_normal_error : nullptr);
 			if (errorval == -ERROR_CALC_DEFAULT)
 			{
 				errorval = -errorval;
 				workscb.block_type = SYM_BTYPE_ERROR;
+			}
+			else if (normal_scb && (candidate_normal_error < *normal_error))
+			{
+				*normal_error = candidate_normal_error;
+				*normal_scb = workscb;
+				normal_scb->errorval = errorval;
 			}
 
 			trace_add_data("error_postrealign", errorval);
@@ -1627,6 +1667,16 @@ void compress_block(
 	scb.errorval = ERROR_CALC_DEFAULT;
 	scb.block_type = SYM_BTYPE_ERROR;
 
+	// Keep the color-error search path unchanged for normal maps, but retain
+	// the candidate with the lowest angular error as the final selection.
+	bool is_ldr = (decode_mode == ASTCENC_PRF_LDR) || (decode_mode == ASTCENC_PRF_LDR_SRGB);
+	bool is_normal = is_ldr && ((ctx.config.flags & ASTCENC_FLG_MAP_NORMAL) != 0);
+	symbolic_compressed_block normal_scb {};
+	normal_scb.block_type = SYM_BTYPE_ERROR;
+	float normal_error = ERROR_CALC_DEFAULT;
+	symbolic_compressed_block* normal_scb_ptr = is_normal ? &normal_scb : nullptr;
+	float* normal_error_ptr = is_normal ? &normal_error : nullptr;
+
 	float best_errorvals_for_pcount[BLOCK_MAX_PARTITIONS] {
 		ERROR_CALC_DEFAULT, ERROR_CALC_DEFAULT, ERROR_CALC_DEFAULT, ERROR_CALC_DEFAULT
 	};
@@ -1670,7 +1720,7 @@ void compress_block(
 		float errorval = compress_symbolic_block_for_partition_1plane(
 		    ctx.config, bsd, blk, i == 0,
 		    error_threshold * errorval_mult[i] * errorval_overshoot,
-		    1, 0,  scb, tmpbuf, QUANT_32);
+		    1, 0, scb, normal_scb_ptr, normal_error_ptr, tmpbuf, QUANT_32);
 
 		// Record the quantization level to filter later searches
 		if (scb.block_type != SYM_BTYPE_ERROR)
@@ -1740,7 +1790,7 @@ void compress_block(
 
 		float errorval = compress_symbolic_block_for_partition_2planes(
 		    ctx.config, bsd, blk, error_threshold * errorval_overshoot,
-		    i, scb, tmpbuf, quant_limit);
+		    i, scb, normal_scb_ptr, normal_error_ptr, tmpbuf, quant_limit);
 
 		// If attempting two planes is much worse than the best one plane result then further two
 		// plane searches are unlikely to help, so move on
@@ -1783,7 +1833,7 @@ void compress_block(
 			    ctx.config, bsd, blk, false,
 			    error_threshold * errorval_overshoot,
 			    partition_count, partition_indices[i],
-			    scb, tmpbuf, quant_limit);
+			    scb, normal_scb_ptr, normal_error_ptr, tmpbuf, quant_limit);
 
 			best_errorvals_for_pcount[partition_count - 1] = astc::min(best_errorvals_for_pcount[partition_count - 1], errorval);
 
@@ -1821,6 +1871,11 @@ void compress_block(
 	trace_add_data("exit", "quality not hit");
 
 END_OF_TESTS:
+	if (normal_scb_ptr && (normal_scb.block_type != SYM_BTYPE_ERROR))
+	{
+		scb = normal_scb;
+	}
+
 	// Replace any remaining error block with the mean color in the compression color space
 	if (scb.block_type == SYM_BTYPE_ERROR)
 	{

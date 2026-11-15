@@ -24,6 +24,104 @@
 #include <stdio.h>
 #include <assert.h>
 
+#if !defined(ASTCENC_DECOMPRESS_ONLY)
+
+/** @brief Weight of the linear angular term in the normal direction metric. */
+static constexpr float NORMAL_ANGLE_LINEAR_WEIGHT { 0.05f };
+
+/** @brief Weight of the quartic angular term in the normal direction metric. */
+static constexpr float NORMAL_ANGLE_QUARTIC_WEIGHT { 8.0f };
+
+/**
+ * @brief Compute a direction-preserving error for a two-component normal.
+ *
+ * The ASTC normal map mode stores X and Y, with Z reconstructed as
+ * sqrt(1 - X^2 - Y^2). A linear error in X/Y is not proportional to the
+ * angular error of the decoded normal; the error grows as the normal tilts
+ * towards the horizon. Compare unit vectors instead so candidate selection
+ * preserves direction rather than raw component values.
+ *
+ * The quartic term prevents grazing-angle outliers from being under-weighted,
+ * while the small linear term targets the mean error seen by the shading
+ * normal.
+ *
+ * @param x       The decoded normal X component in [0, 65535].
+ * @param y       The decoded normal Y component in [0, 65535].
+ * @param orig_x  The original normal X component in [0, 65535].
+ * @param orig_y  The original normal Y component in [0, 65535].
+ *
+ * @return The blended direction error.
+ */
+static float compute_normal_direction_error(
+	float x,
+	float y,
+	float orig_x,
+	float orig_y
+) {
+	constexpr float scale = 1.0f / 32767.5f;
+
+	float nx = x * scale - 1.0f;
+	float ny = y * scale - 1.0f;
+	float nr2 = nx * nx + ny * ny;
+	float nz = sqrtf(astc::max(1.0f - nr2, 0.0f));
+
+	float ox = orig_x * scale - 1.0f;
+	float oy = orig_y * scale - 1.0f;
+	float or2 = ox * ox + oy * oy;
+	float oz = sqrtf(astc::max(1.0f - or2, 0.0f));
+
+	// Normals outside the unit disc decode with Z clamped to zero. Normalize
+	// those vectors so the comparison remains a direction, not a length.
+	float nlen2 = nr2 + nz * nz;
+	float olen2 = or2 + oz * oz;
+	float ninv = 1.0f / sqrtf(astc::max(nlen2, 1e-20f));
+	float oinv = 1.0f / sqrtf(astc::max(olen2, 1e-20f));
+
+	float dot = (nx * ox + ny * oy + nz * oz) * (ninv * oinv);
+	float angle2 = 1.0f - astc::clamp(dot, -1.0f, 1.0f);
+	return angle2
+	     + NORMAL_ANGLE_QUARTIC_WEIGHT * angle2 * angle2
+	     + NORMAL_ANGLE_LINEAR_WEIGHT * sqrtf(2.0f * angle2);
+}
+
+/**
+ * @brief Vector form of @c compute_normal_direction_error().
+ */
+static vfloat compute_normal_direction_error_v(
+	vfloat x,
+	vfloat y,
+	vfloat orig_x,
+	vfloat orig_y
+) {
+	constexpr float scale = 1.0f / 32767.5f;
+	vfloat one(1.0f);
+	vfloat zero(0.0f);
+	vfloat eps(1e-20f);
+
+	vfloat nx = x * scale - one;
+	vfloat ny = y * scale - one;
+	vfloat nr2 = nx * nx + ny * ny;
+	vfloat nz = sqrt(max(one - nr2, zero));
+
+	vfloat ox = orig_x * scale - one;
+	vfloat oy = orig_y * scale - one;
+	vfloat or2 = ox * ox + oy * oy;
+	vfloat oz = sqrt(max(one - or2, zero));
+
+	vfloat nlen2 = nr2 + nz * nz;
+	vfloat olen2 = or2 + oz * oz;
+	vfloat ninv = one / sqrt(max(nlen2, eps));
+	vfloat oinv = one / sqrt(max(olen2, eps));
+
+	vfloat dot = (nx * ox + ny * oy + nz * oz) * (ninv * oinv);
+	vfloat angle2 = one - clamp(-1.0f, 1.0f, dot);
+	return angle2
+	     + vfloat(NORMAL_ANGLE_QUARTIC_WEIGHT) * angle2 * angle2
+	     + vfloat(NORMAL_ANGLE_LINEAR_WEIGHT) * sqrt(vfloat(2.0f) * angle2);
+}
+
+#endif
+
 /**
  * @brief Compute the integer linear interpolation of two color endpoints.
  *
@@ -337,7 +435,8 @@ float compute_symbolic_block_difference_2plane(
 	const astcenc_config& config,
 	const block_size_descriptor& bsd,
 	const symbolic_compressed_block& scb,
-	const image_block& blk
+	const image_block& blk,
+	float* normal_error
 ) {
 	// Reject error blocks
 	if (scb.block_type == SYM_BTYPE_ERROR)
@@ -375,6 +474,11 @@ float compute_symbolic_block_difference_2plane(
 	                       ep0, ep1);
 
 	vmask4 u8_mask = get_u8_component_mask(config.profile, blk);
+	bool compute_normal = normal_error != nullptr;
+	float normal_weight_scale = compute_normal
+	                          ? (blk.channel_weight.lane<0>() + blk.channel_weight.lane<3>()) * 0.5f
+	                          : 0.0f;
+	vfloat4 normal_summa = vfloat4::zero();
 
 	// Unpack and compute error for each texel in the partition
 	unsigned int texel_count = bsd.texel_count;
@@ -418,6 +522,19 @@ float compute_symbolic_block_difference_2plane(
 		error = error * error;
 
 		summa += min(dot(error, blk.channel_weight), ERROR_CALC_DEFAULT);
+
+		if (compute_normal)
+		{
+			float normal_err = compute_normal_direction_error(
+			    color.lane<0>(), color.lane<3>(),
+			    blk.data_r[i], blk.data_a[i]);
+			normal_summa += min(vfloat4(normal_err * normal_weight_scale), ERROR_CALC_DEFAULT);
+		}
+	}
+
+	if (compute_normal)
+	{
+		*normal_error = normal_summa.lane<0>();
 	}
 
 	return summa.lane<0>();
@@ -428,7 +545,8 @@ float compute_symbolic_block_difference_1plane(
 	const astcenc_config& config,
 	const block_size_descriptor& bsd,
 	const symbolic_compressed_block& scb,
-	const image_block& blk
+	const image_block& blk,
+	float* normal_error
 ) {
 	assert(bsd.get_block_mode(scb.block_mode).is_dual_plane == 0);
 
@@ -453,8 +571,13 @@ float compute_symbolic_block_difference_1plane(
 	unpack_weights(bsd, scb, di, false, plane1_weights, nullptr);
 
 	vmask4 u8_mask = get_u8_component_mask(config.profile, blk);
+	bool compute_normal = normal_error != nullptr;
+	float normal_weight_scale = compute_normal
+	                          ? (blk.channel_weight.lane<0>() + blk.channel_weight.lane<3>()) * 0.5f
+	                          : 0.0f;
 
 	vfloat4 summa = vfloat4::zero();
+	vfloat4 normal_summa = vfloat4::zero();
 	for (unsigned int i = 0; i < partition_count; i++)
 	{
 		// Decode the color endpoints for this partition
@@ -512,7 +635,20 @@ float compute_symbolic_block_difference_1plane(
 			error = error * error;
 
 			summa += min(dot(error, blk.channel_weight), ERROR_CALC_DEFAULT);
+
+			if (compute_normal)
+			{
+				float normal_err = compute_normal_direction_error(
+				    color.lane<0>(), color.lane<3>(),
+				    blk.data_r[tix], blk.data_a[tix]);
+				normal_summa += min(vfloat4(normal_err * normal_weight_scale), ERROR_CALC_DEFAULT);
+			}
 		}
+	}
+
+	if (compute_normal)
+	{
+		*normal_error = normal_summa.lane<0>();
 	}
 
 	return summa.lane<0>();
@@ -523,7 +659,8 @@ float compute_symbolic_block_difference_1plane_1partition(
 	const astcenc_config& config,
 	const block_size_descriptor& bsd,
 	const symbolic_compressed_block& scb,
-	const image_block& blk
+	const image_block& blk,
+	float* normal_error
 ) {
 	// Reject error blocks
 	if (scb.block_type == SYM_BTYPE_ERROR)
@@ -555,9 +692,14 @@ float compute_symbolic_block_difference_1plane_1partition(
 	                       ep0, ep1);
 
 	vmask4 u8_mask = get_u8_component_mask(config.profile, blk);
+	bool compute_normal = normal_error != nullptr;
+	float normal_weight_scale = compute_normal
+	                          ? (blk.channel_weight.lane<0>() + blk.channel_weight.lane<3>()) * 0.5f
+	                          : 0.0f;
 
 	// Unpack and compute error for each texel in the partition
 	vfloatacc summav = vfloatacc::zero();
+	vfloatacc normal_summav = vfloatacc::zero();
 
 	vint lane_id = vint::lane_id();
 
@@ -625,6 +767,19 @@ float compute_symbolic_block_difference_1plane_1partition(
 		vmask mask = lane_id < vint(texel_count);
 		lane_id += vint(ASTCENC_SIMD_WIDTH);
 		haccumulate(summav, metric, mask);
+
+		if (compute_normal)
+		{
+			vfloat normal_metric = compute_normal_direction_error_v(
+			    color_r, color_a, color_orig_r, color_orig_a)
+			    * normal_weight_scale;
+			haccumulate(normal_summav, normal_metric, mask);
+		}
+	}
+
+	if (compute_normal)
+	{
+		*normal_error = hadd_s(normal_summav);
 	}
 
 	return hadd_s(summav);

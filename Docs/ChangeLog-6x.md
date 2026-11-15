@@ -55,6 +55,8 @@ header from the same release to avoid compatibility issues.
   * **Image quality:** Reduce visible HDR artifacts with perceptual mode
     enabled by weighting logarithmic channel errors according to geomean
     of channel brightness.
+  * **Image quality:** Select normal map block encodings using angular error,
+    preserving normal direction at grazing angles without changing bitrate.
   * **Optimization:** Hoist loop invariant weight diff calculation out of the
     `compute_ideal_weights_for_decimation()` refinement loop.
   * **Optimization:** Precompute an infilled weight set for the realign loop

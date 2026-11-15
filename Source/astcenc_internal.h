@@ -2211,6 +2211,7 @@ bool decompress_symbolic_block(
  * @param bsd      The block size information.
  * @param scb      The symbolic compressed encoding.
  * @param blk      The original image block color data.
+ * @param normal_error  If non-null, the angular error for normal map data.
  *
  * @return Returns the computed error, or a negative value if the encoding
  *         should be rejected for any reason.
@@ -2219,7 +2220,8 @@ float compute_symbolic_block_difference_2plane(
 	const astcenc_config& config,
 	const block_size_descriptor& bsd,
 	const symbolic_compressed_block& scb,
-	const image_block& blk);
+	const image_block& blk,
+	float* normal_error = nullptr);
 
 /**
  * @brief Compute the error between a symbolic block and the original input data.
@@ -2232,6 +2234,7 @@ float compute_symbolic_block_difference_2plane(
  * @param bsd      The block size information.
  * @param scb      The symbolic compressed encoding.
  * @param blk      The original image block color data.
+ * @param normal_error  If non-null, the angular error for normal map data.
  *
  * @return Returns the computed error, or a negative value if the encoding
  *         should be rejected for any reason.
@@ -2240,7 +2243,8 @@ float compute_symbolic_block_difference_1plane(
 	const astcenc_config& config,
 	const block_size_descriptor& bsd,
 	const symbolic_compressed_block& scb,
-	const image_block& blk);
+	const image_block& blk,
+	float* normal_error = nullptr);
 
 /**
  * @brief Compute the error between a symbolic block and the original input data.
@@ -2253,6 +2257,7 @@ float compute_symbolic_block_difference_1plane(
  * @param bsd      The block size information.
  * @param scb      The symbolic compressed encoding.
  * @param blk      The original image block color data.
+ * @param normal_error  If non-null, the angular error for normal map data.
  *
  * @return Returns the computed error, or a negative value if the encoding
  *         should be rejected for any reason.
@@ -2261,7 +2266,8 @@ float compute_symbolic_block_difference_1plane_1partition(
 	const astcenc_config& config,
 	const block_size_descriptor& bsd,
 	const symbolic_compressed_block& scb,
-	const image_block& blk);
+	const image_block& blk,
+	float* normal_error = nullptr);
 
 /**
  * @brief Convert a symbolic representation into a binary physical encoding.
